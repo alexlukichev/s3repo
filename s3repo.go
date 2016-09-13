@@ -79,7 +79,7 @@ func main() {
 
 	svc := s3.New(sess)
 
-	prefix := *service + "-" + *version
+	prefix := *service + "-" + *version + "."
 
 	log.Debug("Querying bucket %s with prefix %s", *bucket, prefix)
 
