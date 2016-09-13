@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/mitchellh/ioprogress"
 	"github.com/op/go-logging"
 )
 
@@ -34,6 +35,7 @@ var service = flag.String("s", "", "service component to update")
 var version = flag.String("r", "0.1", "version to update")
 var destination = flag.String("d", "", "destination directory")
 var showName = flag.Bool("p", false, "display the name of the downloaded file")
+var showProgress = flag.Bool("i", false, "display progress")
 var debug = flag.Bool("v", false, "verbose output")
 
 var Usage = func() {
@@ -165,8 +167,21 @@ func main() {
 
 			defer destFile.Close()
 
+			var progressR io.Reader
+			if *showProgress {
+				progressR = &ioprogress.Reader{
+					Reader: remote.Body,
+					Size:   *remote.ContentLength,
+					DrawFunc: ioprogress.DrawTerminalf(os.Stdout, func(progress, total int64) string {
+						return fmt.Sprintf("%s: %3d%%", *service, progress*100/total)
+					}),
+				}
+			} else {
+				progressR = remote.Body
+			}
+
 			w := bufio.NewWriter(destFile)
-			if _, err := io.Copy(w, remote.Body); err != nil {
+			if _, err := io.Copy(w, progressR); err != nil {
 				log.Fatal(err)
 			}
 			w.Flush()
