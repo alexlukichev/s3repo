@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
 	"path"
 	"strconv"
@@ -36,6 +37,7 @@ var version = flag.String("r", "0.1", "version to update")
 var destination = flag.String("d", "", "destination directory")
 var showName = flag.Bool("p", false, "display the name of the downloaded file")
 var showProgress = flag.Bool("i", false, "display progress")
+var storeName = flag.String("n", "", "store the name of the downloaded file")
 var debug = flag.Bool("v", false, "verbose output")
 
 var Usage = func() {
@@ -62,6 +64,11 @@ func main() {
 
 	if *bucket == "" {
 		fmt.Println("No bucket provided")
+		os.Exit(1)
+	}
+
+	if *storeName != "" && *showName {
+		fmt.Println("Cannot use both -n and -p options at the same time")
 		os.Exit(1)
 	}
 
@@ -188,6 +195,12 @@ func main() {
 
 			if *showName {
 				fmt.Println(destFilePath)
+			}
+						
+			if *storeName != "" {
+				if err := ioutil.WriteFile(*storeName, []byte(destFilePath), 0644); err != nil {
+					log.Fatal(err)
+				}
 			}
 		} else {
 			fmt.Println("Destination file not provided")
