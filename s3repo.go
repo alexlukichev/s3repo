@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -33,17 +34,42 @@ var format = logging.MustStringFormatter(
 var region = flag.String("z", "us-east-1", "AWS region")
 var bucket = flag.String("b", "", "bucket to query")
 var service = flag.String("s", "", "service component to update")
-var version = flag.String("r", "0.1", "version to update")
+var prefix = flag.String("r", "0.1.", "version prefix to match (DEPRECATED; ignored when used with -w)")
+var pattern = flag.String("w", "", "version pattern to match")
 var destination = flag.String("d", "", "destination directory")
 var showName = flag.Bool("p", false, "display the name of the downloaded file")
 var showProgress = flag.Bool("i", false, "display progress")
-var storeName = flag.String("n", "", "store the name of the downloaded file")
+var storeName = flag.String("n", "", "store the name of the downloaded file in the specified location")
 var debug = flag.Bool("v", false, "verbose output")
 
 var Usage = func() {
 	fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "  %s (list|update)\n", os.Args[0])
 	flag.PrintDefaults()
+}
+
+// Version pattern:
+//   %V - single decimal integer version
+//   %S - alphanumeric (+period) subversion
+//   %G - optional git commit distance (-{NUMBER}-g{HASH})
+//   %B - number in the build sequence
+//   %W - any text
+
+func getKeyRegexp(service string, pattern string) (*regexp.Regexp, error) {
+	quoted := regexp.QuoteMeta(service + "-" + pattern)
+	constructs := make(map[string]string)
+	constructs["%V"] = "([0-9]+)"
+	constructs["%S"] = "([0-9a-zA-Z.,]+)"
+	constructs["%G"] = "(-[0-9]+-g[0-9a-z]+)?"
+	constructs["%B"] = "(?P<buildnum>[0-9]+)"
+	constructs["%W"] = "(.*)"
+
+	var expr string = quoted
+	for k, v := range constructs {
+		expr = strings.Replace(expr, k, v, -1)
+	}
+
+	return regexp.Compile("^" + expr + "$")
 }
 
 func main() {
@@ -86,18 +112,33 @@ func main() {
 
 	svc := s3.New(sess)
 
-	prefix := *service + "-" + *version + "."
+	_prefix := *service + "-"
 
-	log.Debug("Querying bucket %s with prefix %s", *bucket, prefix)
+	var versionPattern *regexp.Regexp
+	var _pattern string
+	if *pattern == "" {
+		_pattern = *prefix + ".%W-%B"
+	} else {
+		_pattern = *pattern
+	}
+
+	versionPattern, err := getKeyRegexp(*service, _pattern)
+	if err != nil {
+		fmt.Printf("Error parsing version pattern: %v\n", err)
+		os.Exit(1)
+	}
+
+	log.Debugf("Querying bucket %s with prefix `%s` and pattern `%s`", *bucket, _prefix, versionPattern.String())
 
 	resp, err := svc.ListObjects(&s3.ListObjectsInput{
 		Bucket: aws.String(*bucket),
-		Prefix: aws.String(prefix),
+		Prefix: aws.String(_prefix),
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	compatibleKeys := make([]string, 0)
 	var maxBuild int = 0
 	var maxKey = ""
 	for _, obj := range resp.Contents {
@@ -109,18 +150,31 @@ func main() {
 		} else {
 			basename = key
 		}
-		log.Debug("Checking file %s (%s)", key, basename)
-		keyComponents := strings.Split(basename, "-")
-		buildStr := keyComponents[len(keyComponents)-1]
-		build, err := strconv.Atoi(buildStr)
-		if err != nil {
-			continue
+
+		match := versionPattern.MatchString(basename)
+		log.Debugf("Checking file %s (%s), match=%v", key, basename, match)
+
+		if match {
+			buildStr := versionPattern.ReplaceAllString(basename, "${buildnum}")
+			if buildStr == "" {
+				if maxBuild == 0 {
+					maxBuild = 0
+					maxKey = key
+				}
+			} else {
+				build, err := strconv.Atoi(buildStr)
+				if err != nil {
+					continue
+				}
+				log.Debugf("For file %s, build=%d", key, build)
+				if build > maxBuild {
+					maxBuild = build
+					maxKey = key
+				}
+			}
+			compatibleKeys = append(compatibleKeys, key)
 		}
-		log.Debug("For file %s, build=%d", key, build)
-		if build > maxBuild {
-			maxBuild = build
-			maxKey = key
-		}
+
 	}
 
 	if maxKey == "" {
@@ -139,12 +193,11 @@ func main() {
 	}
 
 	if command == "list" {
-		for _, obj := range resp.Contents {
-			key := obj.Key
-			if *key == maxKey {
-				fmt.Printf("*%s\n", *key)
+		for _, key := range compatibleKeys {
+			if key == maxKey {
+				fmt.Printf("*%s\n", key)
 			} else {
-				fmt.Printf(" %s\n", *key)
+				fmt.Printf(" %s\n", key)
 			}
 		}
 	} else if command == "update" {
@@ -196,7 +249,7 @@ func main() {
 			if *showName {
 				fmt.Println(destFilePath)
 			}
-						
+
 			if *storeName != "" {
 				if err := ioutil.WriteFile(*storeName, []byte(destFilePath), 0644); err != nil {
 					log.Fatal(err)
